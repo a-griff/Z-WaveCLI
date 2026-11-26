@@ -1,0 +1,233 @@
+diff --git a/cpp/build/Makefile b/cpp/build/Makefile
+index 27ffa338..dacf26ff 100644
+--- a/cpp/build/Makefile
++++ b/cpp/build/Makefile
+@@ -13,10 +13,10 @@
+ 
+ 
+ # what flags we will use for compiling in debug mode
+-DEBUG_CFLAGS    := -Wformat -Wall -Wno-unknown-pragmas -Wno-inline -Werror -Wno-error=sequence-point -Wno-sequence-point -ggdb -DDEBUG -fPIC  -DSYSCONFDIR="\"$(PREFIX)/etc/openzwave/\""
++DEBUG_CFLAGS    := -Wformat -Wall -Wno-unknown-pragmas -Wno-inline  -Wno-error=sequence-point -Wno-sequence-point -ggdb -DDEBUG -fPIC  -DSYSCONFDIR="\"$(PREFIX)/etc/openzwave/\""
+ DEBUG_CPPFLAGS  := -std=c++11 
+ # what flags we will use for compiling in release mode
+-RELEASE_CFLAGS  := -Wall -Wno-unknown-pragmas -Werror -Wno-error=sequence-point -Wno-sequence-point -O3 -DNDEBUG -fPIC  -DSYSCONFDIR="\"$(PREFIX)/etc/openzwave/\""
++RELEASE_CFLAGS  := -Wall -Wno-unknown-pragmas  -Wno-error=sequence-point -Wno-sequence-point -O3 -DNDEBUG -fPIC  -DSYSCONFDIR="\"$(PREFIX)/etc/openzwave/\""
+ RELEASE_CPPFLAGS := -std=c++11
+ #what flags we will use for linking in debug mode
+ DEBUG_LDFLAGS	:= -g
+diff --git a/cpp/hidapi/configure.ac b/cpp/hidapi/configure.ac
+index 3533bef7..d6b0b2a7 100644
+--- a/cpp/hidapi/configure.ac
++++ b/cpp/hidapi/configure.ac
+@@ -19,7 +19,7 @@ lt_age="0"
+ LTLDFLAGS="-version-info ${lt_current}:${lt_revision}:${lt_age}"
+ 
+ AC_CONFIG_MACRO_DIR([m4])
+-AM_INIT_AUTOMAKE([foreign -Wall -Werror])
++AM_INIT_AUTOMAKE([foreign -Wall ])
+ AC_CONFIG_MACRO_DIR([m4])
+ 
+ m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
+diff --git a/cpp/src/Defs.h b/cpp/src/Defs.h
+index 2789311d..1c6a4ffa 100644
+--- a/cpp/src/Defs.h
++++ b/cpp/src/Defs.h
+@@ -259,6 +259,7 @@ namespace OpenZWave
+ #define FUNC_ID_SERIAL_API_GET_INIT_DATA				0x02
+ #define FUNC_ID_SERIAL_API_APPL_NODE_INFORMATION		0x03
+ #define FUNC_ID_APPLICATION_COMMAND_HANDLER				0x04
++#define FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE 0xA8
+ #define FUNC_ID_ZW_GET_CONTROLLER_CAPABILITIES			0x05
+ #define FUNC_ID_SERIAL_API_SET_TIMEOUTS 				0x06
+ #define FUNC_ID_SERIAL_API_GET_CAPABILITIES				0x07
+@@ -440,6 +441,7 @@ namespace OpenZWave
+ 
+ /* Serial API Setup Commands */
+ #define SERIAL_API_SETUP_CMD_TX_STATUS_REPORT			0x02
++#define SERIAL_API_SETUP_CMD_NODEID_BASETYPE_SET 0x80
+ #define SERIAL_API_SETUP_CMD_TX_POWERLEVEL_SET 			0x04
+ #define SERIAL_API_SETUP_CMD_TX_POWERLEVEL_GET 			0x08
+ #define SERIAL_API_SETUP_CMD_TX_GET_MAX_PAYLOAD_SIZE	0x10
+diff --git a/cpp/src/Driver.cpp b/cpp/src/Driver.cpp
+index 84124da9..72db9c99 100644
+--- a/cpp/src/Driver.cpp
++++ b/cpp/src/Driver.cpp
+@@ -1801,6 +1801,38 @@ bool Driver::ReadMsg()
+ //-----------------------------------------------------------------------------
+ void Driver::ProcessMsg(uint8* _data, uint8 _length)
+ {
++    // BEGIN ZOOZ BRIDGE PATCH
++    uint8 bridgeData[256] = {0};
++
++    if (_length >= 2 && _data[0] == REQUEST &&
++        _data[1] == FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE)
++    {
++        if (_length < 9 || _data[5] < 2 ||
++            (unsigned int)_data[5] + 7 > _length)
++        {
++            Log::Write(LogLevel_Warning, "Invalid Bridge message");
++            return;
++        }
++
++        // Only translate messages addressed to this controller.
++        if (_data[3] != GetControllerNodeId())
++            return;
++
++        bridgeData[0] = _data[0];
++        bridgeData[1] = FUNC_ID_APPLICATION_COMMAND_HANDLER;
++        bridgeData[2] = _data[2];
++        bridgeData[3] = _data[4];
++        bridgeData[4] = _data[5];
++
++        memcpy(&bridgeData[5], &_data[6], _data[5]);
++
++        _length = bridgeData[4] + 6;
++        _data = bridgeData;
++
++        Log::Write(LogLevel_Detail, "Translated Bridge message");
++    }
++    // END ZOOZ BRIDGE PATCH
++
+ 	bool handleCallback = true;
+ 	bool wasencrypted = false;
+ 	//uint8 nodeId = GetNodeNumber( m_currentMsg );
+@@ -2443,7 +2475,7 @@ void Driver::HandleGetVersionResponse(uint8* _data)
+ 	}
+ 	Log::Write(LogLevel_Info, GetNodeNumber(m_currentMsg), "Received reply to FUNC_ID_ZW_GET_VERSION:");
+ 	Log::Write(LogLevel_Info, GetNodeNumber(m_currentMsg), "    %s library, version %s", m_libraryTypeName.c_str(), m_libraryVersion.c_str());
+-	if (!((m_libraryType == ZW_LIB_CONTROLLER_STATIC) || (m_libraryType == ZW_LIB_CONTROLLER)))
++	if (!((m_libraryType == ZW_LIB_CONTROLLER_STATIC) || (m_libraryType == ZW_LIB_CONTROLLER) || (m_libraryType == ZW_LIB_CONTROLLER_BRIDGE)))
+ 	{
+ 		Log::Write(LogLevel_Fatal, GetNodeNumber(m_currentMsg), "Z-Wave Interface is not a Supported Library Type: %s", m_libraryTypeName.c_str());
+ 		Log::Write(LogLevel_Fatal, GetNodeNumber(m_currentMsg), "Z-Wave Interface should be a Static Controller Library Type");
+@@ -2463,6 +2495,21 @@ void Driver::HandleGetVersionResponse(uint8* _data)
+ 		m_driverThread->Stop();
+ 	}
+ 	/* send the Next Initilization Message */
++
++    // ZWAVECLI_8BIT_INIT
++    // Configure legacy 8-bit Node IDs before reading Home ID.
++    if (m_libraryType == ZW_LIB_CONTROLLER_BRIDGE)
++    {
++        Internal::Msg* msg = new Internal::Msg(
++            "SERIAL_API_SETUP_NODEID_BASETYPE_SET",
++            0xff, REQUEST, FUNC_ID_SERIAL_API_SETUP, false);
++
++        msg->Append(SERIAL_API_SETUP_CMD_NODEID_BASETYPE_SET);
++        msg->Append(0x01);
++
++        SendMsg(msg, Driver::MsgQueue_Command);
++    }
++
+ 	SendMsg(new Internal::Msg("FUNC_ID_ZW_MEMORY_GET_ID", 0xff, REQUEST, FUNC_ID_ZW_MEMORY_GET_ID, false), Driver::MsgQueue_Command);
+ 	return;
+ }
+@@ -2479,29 +2526,34 @@ void Driver::HandleGetRandomResponse(uint8* _data)
+ 
+ void Driver::HandleSerialAPISetupResponse(uint8* _data)
+ {
+-	// See INS13954 for description of FUNC_ID_SERIAL_API_SETUP with command 
+-	// SERIAL_API_SETUP_CMD_TX_STATUS_REPORT
+-	// Note: SERIAL_API_SETUP can do more things than enable this report...
++    Log::Write(LogLevel_Info,
++        "Received reply to FUNC_ID_SERIAL_API_SETUP");
+ 
+-	Log::Write(LogLevel_Info, "Received reply to FUNC_ID_SERIAL_API_SETUP");
++    if (_data[2] == SERIAL_API_SETUP_CMD_NODEID_BASETYPE_SET)
++    {
++        if (_data[3] == 1)
++            Log::Write(LogLevel_Info,
++                "Successfully enabled 8-bit Node IDs.");
++        else
++            Log::Write(LogLevel_Warning,
++                "Controller rejected 8-bit Node ID setup.");
+ 
+-	switch (_data[0])
+-	{
+-		case 1:
+-			Log::Write(LogLevel_Info, "Successfully enabled extended txStatusReport.");
+-			m_hasExtendedTxStatus = true;
+-			break;
++        return;
++    }
+ 
+-		case 0:
+-			Log::Write(LogLevel_Info, "Failed to enable extended txStatusReport. Controller might not support it.");
+-			m_hasExtendedTxStatus = false;
+-			break;
++    if (_data[2] == SERIAL_API_SETUP_CMD_TX_STATUS_REPORT)
++    {
++        m_hasExtendedTxStatus = (_data[3] == 1);
+ 
+-		default:
+-			Log::Write(LogLevel_Info, "FUNC_ID_SERIAL_API_SETUP returned unknown status: %u", _data[0]);
+-			m_hasExtendedTxStatus = false;
+-			break;
+-	}
++        Log::Write(LogLevel_Info,
++            "Extended TxStatus: %s",
++            m_hasExtendedTxStatus ? "enabled" : "disabled");
++
++        return;
++    }
++
++    Log::Write(LogLevel_Warning,
++        "Unsupported Serial API Setup response: %u", _data[2]);
+ }
+ 
+ //-----------------------------------------------------------------------------
+diff --git a/cpp/src/Node.cpp b/cpp/src/Node.cpp
+index 0ecd05a0..7c22c565 100644
+--- a/cpp/src/Node.cpp
++++ b/cpp/src/Node.cpp
+@@ -4057,6 +4057,9 @@ void Node::WriteMetaDataXML(TiXmlElement *mdElement)
+ //-----------------------------------------------------------------------------
+ uint8 Node::CreateSupervisionSession(uint8 _command_class_id, uint8 _index)
+ {
++	// BINARY_SWITCH_SUPERVISION_BYPASS
++	if (_command_class_id == 0x25)
++		return Internal::CC::Supervision::StaticNoSessionId();
+ 	if (Internal::CC::CommandClass* cc = GetCommandClass(Internal::CC::Supervision::StaticGetCommandClassId()))
+ 	{
+ 		return cc->CreateSupervisionSession(_command_class_id, _index);
+diff --git a/debian/rules b/debian/rules
+index cf55ac77..dfbe13c7 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -2,10 +2,10 @@
+ 
+ export DH_VERBOSE=1
+ 
+-# because of a issue un Ubuntu - cc1: error: -Wformat-security ignored without -Wformat [-Werror=format-security]
+-CPPFLAGS:=$(shell dpkg-buildflags --get CPPFLAGS | sed -e "s/-Wformat-security//g" -e "s/-Wformat//g" -e "s/-Werror\=format-security//g")
+-CFLAGS:=$(shell dpkg-buildflags --get CFLAGS | sed -e "s/-Wformat-security//g" -e "s/-Wformat//g" -e "s/-Werror\=format-security//g")
+-CXXFLAGS:=$(shell dpkg-buildflags --get CXXFLAGS | sed -e "s/-Wformat-security//g" -e "s/-Wformat//g" -e "s/-Werror\=format-security//g")
++# because of a issue un Ubuntu - cc1: error: -Wformat-security ignored without -Wformat [=format-security]
++CPPFLAGS:=$(shell dpkg-buildflags --get CPPFLAGS | sed -e "s/-Wformat-security//g" -e "s/-Wformat//g" -e "s/\=format-security//g")
++CFLAGS:=$(shell dpkg-buildflags --get CFLAGS | sed -e "s/-Wformat-security//g" -e "s/-Wformat//g" -e "s/\=format-security//g")
++CXXFLAGS:=$(shell dpkg-buildflags --get CXXFLAGS | sed -e "s/-Wformat-security//g" -e "s/-Wformat//g" -e "s/\=format-security//g")
+ LDFLAGS:=$(shell dpkg-buildflags --get LDFLAGS)
+ #XXX: MORECPPFLAGS=-fPIE -pie
+ MORECPPFLAGS:=$(CFLAGS)
+diff --git a/dist/openzwave.spec b/dist/openzwave.spec
+index 8057cede..525c7004 100644
+--- a/dist/openzwave.spec
++++ b/dist/openzwave.spec
+@@ -3,7 +3,7 @@
+ %endif
+ 
+ Name:     openzwave
+-Version:  1.6.1958
++Version:  1.6.1965
+ Release:  1.0%{?dist}
+ Summary:  Sample Executables for OpenZWave
+ URL:      http://www.openzwave.net
+@@ -135,7 +135,7 @@ getent group zwave >/dev/null || groupadd -f -r zwave
+ 
+ 
+ %changelog
+-* Wed May 08 2019 Justin Hammond <justin@dynam.ac> - 1.6.1958
++* Wed May 08 2019 Justin Hammond <justin@dynam.ac> - 1.6.1965
+ - Update to new release of OpenZwave - 1.6
+ 
+ * Fri Feb 01 2019 Fedora Release Engineering <releng@fedoraproject.org> - 1.5.0-0.20180624git1e36dcc.0
